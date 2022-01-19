@@ -113,12 +113,19 @@ func (ipas *ipAddressSource) doGetValuesAndSetWatch() {
 func (ipas *ipAddressSource) ClearWatch() { ipas.watchClearer() }
 
 func extractIPAddresses(endpoints *apicorev1.Endpoints) []string {
-	ipAddresses := make([]string, 0, 16)
-	for i := range endpoints.Subsets {
-		endpointSubset := &endpoints.Subsets[i]
-		for j := range endpointSubset.Addresses {
-			endpointAddress := &endpointSubset.Addresses[j]
-			ipAddresses = append(ipAddresses, endpointAddress.IP)
+	var i int
+	for j := range endpoints.Subsets {
+		endpointSubset := &endpoints.Subsets[j]
+		i += len(endpointSubset.Addresses)
+	}
+	ipAddresses := make([]string, i)
+	i = 0
+	for j := range endpoints.Subsets {
+		endpointSubset := &endpoints.Subsets[j]
+		for k := range endpointSubset.Addresses {
+			endpointAddress := &endpointSubset.Addresses[k]
+			ipAddresses[i] = endpointAddress.IP
+			i++
 		}
 	}
 	return ipAddresses
