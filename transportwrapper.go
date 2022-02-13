@@ -20,6 +20,7 @@ var makeTransportWrapperResults struct {
 
 var makeTransportWrapperOnce sync.Once
 
+// WrapTransport wraps the given transport for client-side random load balancing.
 func WrapTransport(transport http.RoundTripper) (http.RoundTripper, error) {
 	transportWrapper := &makeTransportWrapperResults.TransportWrapper
 	err := &makeTransportWrapperResults.Err
@@ -39,6 +40,7 @@ func WrapTransport(transport http.RoundTripper) (http.RoundTripper, error) {
 	return transport, nil
 }
 
+// MustWrapTransport likes WrapTransport but panics when an error occurs.
 func MustWrapTransport(transport http.RoundTripper) http.RoundTripper {
 	transport, err := WrapTransport(transport)
 	if err != nil {
