@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,10 +34,11 @@ func TestIPAddressSource_GetValuesAndSetWatch(t *testing.T) {
 		ExpOut, ActOut struct {
 			ResultsList []Results
 		}
-		Ctx       context.Context
-		Cancel    context.CancelFunc
-		Clientset *fakeclient.Clientset
-		IPAS      *IPAddressSource
+		Ctx         context.Context
+		Cancel      context.CancelFunc
+		Clientset   *fakeclient.Clientset
+		IPAS        *IPAddressSource
+		ResultCount int64
 	}
 	tc := testcase.New().
 		Step(0, func(t *testing.T, w *Workspace) {
@@ -64,6 +66,7 @@ func TestIPAddressSource_GetValuesAndSetWatch(t *testing.T) {
 				}
 				results := Results{values, err, errStr}
 				w.ActOut.ResultsList = append(w.ActOut.ResultsList, results)
+				atomic.AddInt64(&w.ResultCount, 1)
 				wg.Done()
 			})
 			wg.Wait()
@@ -183,7 +186,9 @@ func TestIPAddressSource_GetValuesAndSetWatch(t *testing.T) {
 				}, metav1.CreateOptions{})
 				w.Clientset.PrependWatchReactor("endpoints", func(action clienttesting.Action) (handled bool, ret watch.Interface, err error) {
 					go func() {
-						time.Sleep(100 * time.Millisecond)
+						for atomic.LoadInt64(&w.ResultCount) == 0 {
+							time.Sleep(100 * time.Millisecond)
+						}
 						w.IPAS.ClearWatch()
 					}()
 					return false, nil, nil
