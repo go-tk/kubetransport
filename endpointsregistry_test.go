@@ -184,7 +184,11 @@ func TestEndpointsRegistry_GetIPAddresses(t *testing.T) {
 		tc.Copy().
 			Then("should succeed (4)").
 			Step(1.5, func(t *testing.T, w *Workspace) {
+				f := false
 				w.Clientset.PrependWatchReactor("endpoints", func(action clienttesting.Action) (handled bool, ret watch.Interface, err error) {
+					if f {
+						return false, nil, nil
+					}
 					watch := watch.NewRaceFreeFake()
 					go func() {
 						watch.Error(&metav1.Status{
@@ -192,6 +196,7 @@ func TestEndpointsRegistry_GetIPAddresses(t *testing.T) {
 							Message: "too many requests",
 						})
 					}()
+					f = true
 					return true, watch, nil
 				})
 				ipAddresses, err := w.ER.GetIPAddresses(context.Background(), "foo", "bar")

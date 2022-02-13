@@ -80,27 +80,23 @@ func (er *endpointsRegistry) GetIPAddresses(ctx context.Context, namespace strin
 
 func (er *endpointsRegistry) doGetIPAddresses(endpointKey endpointKey, results *getIPAddressesResults) {
 	ipAddressSource := newIPAddressSource(er.backgroundCtx, er.endpointsGetter, endpointKey.Namespace, endpointKey.EndpointsName)
-	var hitCount *int64
+	hitCount := int64(1)
 	ipAddressSource.GetValuesAndSetWatch(func(ipAddresses []string, err error) {
+		if err == nil {
+			ipAddressesCache := ipAddressesCache{
+				Source:   ipAddressSource,
+				Value:    ipAddresses,
+				HitCount: &hitCount,
+			}
+			er.m.Store(endpointKey, &ipAddressesCache)
+		} else {
+			er.m.Delete(endpointKey)
+		}
 		if results != nil {
 			results.IPAddresses, results.Err = ipAddresses, err
 			close(results.Waiter)
 			results = nil
 		}
-		if err != nil {
-			er.m.Delete(endpointKey)
-			return
-		}
-		if hitCount == nil {
-			hitCount = new(int64)
-			*hitCount = 1
-		}
-		ipAddressesCache := ipAddressesCache{
-			Source:   ipAddressSource,
-			Value:    ipAddresses,
-			HitCount: hitCount,
-		}
-		er.m.Store(endpointKey, &ipAddressesCache)
 	})
 }
 
