@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/go-tk/kubetransport"
 	"github.com/go-tk/testcase"
-	. "github.com/roy2220/kubetransport"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

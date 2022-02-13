@@ -1,4 +1,4 @@
-module github.com/roy2220/kubetransport
+module github.com/go-tk/kubetransport
 
 go 1.17
 
