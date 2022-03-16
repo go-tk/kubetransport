@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	apicorev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -85,14 +85,14 @@ func (ipas *ipAddressSource) doGetValuesAndSetWatch() {
 			}
 			switch event.Type {
 			case watch.Added:
-				endpoints = event.Object.(*apicorev1.Endpoints)
+				endpoints = event.Object.(*v1.Endpoints)
 				if endpoints.ResourceVersion == firstResourceVersion {
 					continue
 				}
 				values := extractIPAddresses(endpoints)
 				ipas.callback(values, nil)
 			case watch.Modified:
-				endpoints = event.Object.(*apicorev1.Endpoints)
+				endpoints = event.Object.(*v1.Endpoints)
 				values := extractIPAddresses(endpoints)
 				ipas.callback(values, nil)
 			case watch.Deleted:
@@ -112,7 +112,7 @@ func (ipas *ipAddressSource) doGetValuesAndSetWatch() {
 
 func (ipas *ipAddressSource) ClearWatch() { ipas.watchClearer() }
 
-func extractIPAddresses(endpoints *apicorev1.Endpoints) []string {
+func extractIPAddresses(endpoints *v1.Endpoints) []string {
 	var i int
 	for j := range endpoints.Subsets {
 		endpointSubset := &endpoints.Subsets[j]

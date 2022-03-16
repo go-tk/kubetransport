@@ -34,10 +34,11 @@ func (kt *kubeTransport) RoundTrip(request *http.Request) (*http.Response, error
 
 func (kt *kubeTransport) resolveHostname(request *http.Request) error {
 	url := request.URL
-	if !strings.HasPrefix(url.Scheme, "kube-") {
+	const schemePrefix = "kube-"
+	if !strings.HasPrefix(url.Scheme, schemePrefix) {
 		return nil
 	}
-	url.Scheme = url.Scheme[len("kube-"):]
+	url.Scheme = url.Scheme[len(schemePrefix):]
 	hostname := url.Host
 	var port string
 	if i := strings.LastIndexByte(hostname, ':'); i >= 0 {
