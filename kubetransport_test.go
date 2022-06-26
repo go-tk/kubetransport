@@ -4,190 +4,274 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"testing"
 	"time"
+	"unsafe"
 
 	. "github.com/go-tk/kubetransport"
+	"github.com/go-tk/kubetransport/internal/k8sclient"
+	mock_k8sclient "github.com/go-tk/kubetransport/internal/k8sclient/mock"
 	"github.com/go-tk/testcase"
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	fakeclient "k8s.io/client-go/kubernetes/fake"
-	clienttesting "k8s.io/client-go/testing"
 )
 
 func TestKubeTransport_RoundTrip(t *testing.T) {
 	type Workspace struct {
 		Init struct {
 			EndpointsRegistry *EndpointsRegistry
-			CurrentNamespace  string
-			Transport         http.RoundTripper
+			TransportFunc     transportFunc
+			Seed              uint64
 		}
 		In struct {
 			Request *http.Request
 		}
 		ExpOut, ActOut struct {
-			URL    *url.URL
-			Err    error
-			ErrStr string
+			Response unsafe.Pointer
+			Err      error
+			ErrStr   string
 		}
-		Clientset *fakeclient.Clientset
-		KT        *KubeTransport
+
+		MockK8sClient *mock_k8sclient.MockK8sClient
+		KT            *KubeTransport
 	}
 	tc := testcase.New().
 		Step(0, func(t *testing.T, w *Workspace) {
-			backgroundCtx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			clientset := fakeclient.NewSimpleClientset()
-			w.Init.EndpointsRegistry = NewEndpointsRegistry(backgroundCtx, clientset.CoreV1(), 1*time.Minute)
-			w.Init.CurrentNamespace = "hello"
-			w.Init.Transport = transportFunc(func(request *http.Request) (*http.Response, error) {
-				w.ActOut.URL = request.URL
-				return nil, nil
-			})
-			w.Clientset = clientset
+			ctrl := gomock.NewController(t)
+			w.MockK8sClient = mock_k8sclient.NewMockK8sClient(ctrl)
+			w.Init.EndpointsRegistry = NewEndpointsRegistry(context.Background(), w.MockK8sClient, 24*time.Hour)
+			t.Cleanup(w.Init.EndpointsRegistry.Close)
+			var response http.Response
+			w.Init.TransportFunc = func(*http.Request) (*http.Response, error) { return &response, nil }
+			w.Init.Seed = 100
+			w.ExpOut.Response = unsafe.Pointer(&response)
 		}).
 		Step(1, func(t *testing.T, w *Workspace) {
-			w.KT = NewKubeTransport(w.Init.EndpointsRegistry, w.Init.CurrentNamespace, w.Init.Transport)
+			w.KT = NewKubeTransport(w.Init.EndpointsRegistry, w.Init.TransportFunc, w.Init.Seed)
 		}).
 		Step(2, func(t *testing.T, w *Workspace) {
-			_, err := w.KT.RoundTrip(w.In.Request)
+			response, err := w.KT.RoundTrip(w.In.Request)
+			w.ActOut.Response = unsafe.Pointer(response)
 			if err != nil {
 				w.ActOut.Err = err
 				w.ActOut.ErrStr = err.Error()
 			}
 		}).
 		Step(3, func(t *testing.T, w *Workspace) {
+			if w.ExpOut.Err == nil || errors.Is(w.ActOut.Err, w.ExpOut.Err) {
+				w.ExpOut.Err = w.ActOut.Err
+			}
 			assert.Equal(t, w.ExpOut, w.ActOut)
 		})
-	errSomethingWrong := errors.New("something wrong")
 	testcase.RunListParallel(t,
 		tc.Copy().
-			Then("should succeed (1)").
 			Step(1.5, func(t *testing.T, w *Workspace) {
-				request, err := http.NewRequest("GET", "http://abc.com/", nil)
+				var err error
+				w.In.Request, err = http.NewRequest("GET", "https://google.com", nil)
 				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
-				w.In.Request = request
-				w.ExpOut.URL = &url.URL{Scheme: "http", Host: "abc.com", Path: "/"}
 			}),
 		tc.Copy().
-			Then("should succeed (2)").
-			Step(1.5, func(t *testing.T, w *Workspace) {
-				w.Clientset.CoreV1().Endpoints("foo").Create(context.Background(), &v1.Endpoints{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:            "bar",
-						ResourceVersion: "version1",
-					},
-					Subsets: []v1.EndpointSubset{
-						{Addresses: []v1.EndpointAddress{{IP: "1.2.3.4"}}},
-					},
-				}, metav1.CreateOptions{})
-				request, err := http.NewRequest("GET", "kube-http://bar.foo/", nil)
-				if !assert.NoError(t, err) {
-					t.FailNow()
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.MockK8sClient.EXPECT().Namespace().Return("foo").Times(2)
+				w.MockK8sClient.EXPECT().GetEndpoints(gomock.Any(), gomock.Eq("foo"), gomock.Eq("my-app")).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName string) (*k8sclient.Endpoints, error) {
+						return &k8sclient.Endpoints{
+							Metadata: k8sclient.Metadata{
+								ResourceVersion: "8910",
+							},
+							Subsets: []k8sclient.EndpointSubset{
+								{
+									Addresses: []k8sclient.EndpointAddress{
+										{IP: "1.2.3.4"},
+										{IP: "2.3.4.5"},
+									},
+								},
+								{
+									Addresses: []k8sclient.EndpointAddress{
+										{IP: "7.7.7.7"},
+										{IP: "8.8.8.8"},
+									},
+								},
+							},
+						}, nil
+					})
+				w.MockK8sClient.EXPECT().WatchEndpoints(gomock.Any(), gomock.Eq("foo"), gomock.Eq("my-app"), gomock.Eq("8910"), gomock.Any()).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName, resourceVersion string, callback k8sclient.WatchEndpointsCallback) error {
+						<-ctx.Done()
+						return ctx.Err()
+					}).MinTimes(0)
+				var response http.Response
+				var n int
+				w.Init.TransportFunc = func(request *http.Request) (*http.Response, error) {
+					n++
+					switch n {
+					case 1:
+						assert.Equal(t, "https://8.8.8.8/aa/bb", request.URL.String())
+					case 2:
+						assert.Equal(t, "https://1.2.3.4/aa/bb", request.URL.String())
+					case 3:
+						t.Fatal()
+					}
+					return &response, nil
 				}
-				w.In.Request = request
-				w.ExpOut.URL = &url.URL{Scheme: "http", Host: "1.2.3.4", Path: "/"}
-			}),
-		tc.Copy().
-			Then("should succeed (3)").
-			Step(1.5, func(t *testing.T, w *Workspace) {
-				w.Clientset.CoreV1().Endpoints("foo").Create(context.Background(), &v1.Endpoints{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:            "bar",
-						ResourceVersion: "version1",
-					},
-					Subsets: []v1.EndpointSubset{
-						{Addresses: []v1.EndpointAddress{{IP: "1.2.3.4"}}},
-					},
-				}, metav1.CreateOptions{})
-				request, err := http.NewRequest("GET", "kube-http://bar.foo.svc.cluster.local:2220/", nil)
-				if !assert.NoError(t, err) {
-					t.FailNow()
-				}
-				w.In.Request = request
-				w.ExpOut.URL = &url.URL{Scheme: "http", Host: "1.2.3.4:2220", Path: "/"}
-			}),
-		tc.Copy().
-			Given("endpoints not found (1)").
-			Then("should fail").
-			Step(1.5, func(t *testing.T, w *Workspace) {
-				request, err := http.NewRequest("GET", "kube-http://world/", nil)
-				if !assert.NoError(t, err) {
-					t.FailNow()
-				}
-				w.In.Request = request
-				w.ExpOut.ErrStr = "kubetransport: endpoints not found; namespace=\"hello\" endpointsName=\"world\""
+				w.Init.Seed = 99
+				w.ExpOut.Response = unsafe.Pointer(&response)
 			}).
-			Step(2.5, func(t *testing.T, w *Workspace) {
-				err := &w.ActOut.Err
-				if assert.ErrorIs(t, *err, ErrEndpointsNotFound) {
-					*err = nil
-				}
-			}),
-		tc.Copy().
-			Given("endpoints not found (2)").
-			Then("should fail").
 			Step(1.5, func(t *testing.T, w *Workspace) {
-				request, err := http.NewRequest("GET", "kube-http://bar.foo/", nil)
+				var err error
+				w.In.Request, err = http.NewRequest("GET", "kube-https://my-app/aa/bb", nil)
 				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
-				w.In.Request = request
-				w.ExpOut.ErrStr = "kubetransport: endpoints not found; namespace=\"foo\" endpointsName=\"bar\""
 			}).
-			Step(2.5, func(t *testing.T, w *Workspace) {
-				err := &w.ActOut.Err
-				if assert.ErrorIs(t, *err, ErrEndpointsNotFound) {
-					*err = nil
+			Step(3.5, func(t *testing.T, w *Workspace) {
+				if t.Failed() {
+					return
 				}
-			}),
-		tc.Copy().
-			Given("no ip address").
-			Then("should fail").
-			Step(1.5, func(t *testing.T, w *Workspace) {
-				w.Clientset.CoreV1().Endpoints("foo").Create(context.Background(), &v1.Endpoints{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:            "bar",
-						ResourceVersion: "version1",
-					},
-				}, metav1.CreateOptions{})
-				request, err := http.NewRequest("GET", "kube-http://bar.foo/", nil)
+				request, err := http.NewRequest("GET", "kube-https://my-app/aa/bb", nil)
 				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
-				w.In.Request = request
-				w.ExpOut.ErrStr = "kubetransport: no ip address; namespace=\"foo\" endpointsName=\"bar\""
-			}).
-			Step(2.5, func(t *testing.T, w *Workspace) {
-				err := &w.ActOut.Err
-				if assert.ErrorIs(t, *err, ErrNoIPAddress) {
-					*err = nil
-				}
+				w.KT.RoundTrip(request)
 			}),
 		tc.Copy().
-			Given("getting ip addresses error").
-			Then("should fail").
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.MockK8sClient.EXPECT().GetEndpoints(gomock.Any(), gomock.Eq("test"), gomock.Eq("my-app")).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName string) (*k8sclient.Endpoints, error) {
+						return &k8sclient.Endpoints{
+							Metadata: k8sclient.Metadata{
+								ResourceVersion: "8910",
+							},
+							Subsets: []k8sclient.EndpointSubset{
+								{
+									Addresses: []k8sclient.EndpointAddress{
+										{IP: "1.2.3.4"},
+									},
+								},
+							},
+						}, nil
+					})
+				w.MockK8sClient.EXPECT().WatchEndpoints(gomock.Any(), gomock.Eq("test"), gomock.Eq("my-app"), gomock.Eq("8910"), gomock.Any()).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName, resourceVersion string, callback k8sclient.WatchEndpointsCallback) error {
+						<-ctx.Done()
+						return ctx.Err()
+					}).MinTimes(0)
+				var response http.Response
+				w.Init.TransportFunc = func(request *http.Request) (*http.Response, error) {
+					assert.Equal(t, "https://1.2.3.4/aa/bb", request.URL.String())
+					return &response, nil
+				}
+				w.ExpOut.Response = unsafe.Pointer(&response)
+			}).
 			Step(1.5, func(t *testing.T, w *Workspace) {
-				w.Clientset.PrependReactor("get", "endpoints", func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
-					return true, nil, errSomethingWrong
-				})
-				request, err := http.NewRequest("GET", "kube-http://bar.foo.svc.cluster.local:2220/", nil)
+				var err error
+				w.In.Request, err = http.NewRequest("GET", "kube-https://my-app.test/aa/bb", nil)
 				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
-				w.In.Request = request
-				w.ExpOut.ErrStr = "get ip addresses; hostname=\"bar.foo.svc.cluster.local\": get endpoints; namespace=\"foo\" endpointsName=\"bar\": something wrong"
-			}).
-			Step(2.5, func(t *testing.T, w *Workspace) {
-				err := &w.ActOut.Err
-				if assert.ErrorIs(t, *err, errSomethingWrong) {
-					*err = nil
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.MockK8sClient.EXPECT().GetEndpoints(gomock.Any(), gomock.Eq("test"), gomock.Eq("my-app")).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName string) (*k8sclient.Endpoints, error) {
+						return &k8sclient.Endpoints{
+							Metadata: k8sclient.Metadata{
+								ResourceVersion: "8910",
+							},
+							Subsets: []k8sclient.EndpointSubset{
+								{
+									Addresses: []k8sclient.EndpointAddress{
+										{IP: "1.2.3.4"},
+									},
+								},
+							},
+						}, nil
+					})
+				w.MockK8sClient.EXPECT().WatchEndpoints(gomock.Any(), gomock.Eq("test"), gomock.Eq("my-app"), gomock.Eq("8910"), gomock.Any()).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName, resourceVersion string, callback k8sclient.WatchEndpointsCallback) error {
+						<-ctx.Done()
+						return ctx.Err()
+					}).MinTimes(0)
+				var response http.Response
+				w.Init.TransportFunc = func(request *http.Request) (*http.Response, error) {
+					assert.Equal(t, "https://1.2.3.4:8888/aa/bb", request.URL.String())
+					return &response, nil
 				}
+				w.ExpOut.Response = unsafe.Pointer(&response)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				var err error
+				w.In.Request, err = http.NewRequest("GET", "kube-https://my-app.test.svc.cluster.local:8888/aa/bb", nil)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.MockK8sClient.EXPECT().GetEndpoints(gomock.Any(), gomock.Eq("test"), gomock.Eq("my-app")).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName string) (*k8sclient.Endpoints, error) {
+						return nil, nil
+					})
+				w.MockK8sClient.EXPECT().WatchEndpoints(gomock.Any(), gomock.Eq("test"), gomock.Eq("my-app"), gomock.Eq(""), gomock.Any()).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName, resourceVersion string, callback k8sclient.WatchEndpointsCallback) error {
+						<-ctx.Done()
+						return ctx.Err()
+					}).MinTimes(0)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				var err error
+				w.In.Request, err = http.NewRequest("GET", "kube-https://my-app.test/aa/bb", nil)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.ExpOut.Response = nil
+				w.ExpOut.Err = ErrEndpointsNotFound
+				w.ExpOut.ErrStr = "kubetransport: endpoints not found; namespace=\"test\" endpointsName=\"my-app\""
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.MockK8sClient.EXPECT().GetEndpoints(gomock.Any(), gomock.Eq("test"), gomock.Eq("my-app")).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName string) (*k8sclient.Endpoints, error) {
+						return &k8sclient.Endpoints{
+							Metadata: k8sclient.Metadata{
+								ResourceVersion: "8910",
+							},
+						}, nil
+					})
+				w.MockK8sClient.EXPECT().WatchEndpoints(gomock.Any(), gomock.Eq("test"), gomock.Eq("my-app"), gomock.Eq("8910"), gomock.Any()).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName, resourceVersion string, callback k8sclient.WatchEndpointsCallback) error {
+						<-ctx.Done()
+						return ctx.Err()
+					}).MinTimes(0)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				var err error
+				w.In.Request, err = http.NewRequest("GET", "kube-https://my-app.test/aa/bb", nil)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.ExpOut.Response = nil
+				w.ExpOut.Err = ErrNoIPAddress
+				w.ExpOut.ErrStr = "kubetransport: no ip address; namespace=\"test\" endpointsName=\"my-app\""
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.MockK8sClient.EXPECT().GetEndpoints(gomock.Any(), gomock.Eq("test"), gomock.Eq("my-app")).
+					DoAndReturn(func(ctx context.Context, namespace, endpointsName string) (*k8sclient.Endpoints, error) {
+						return nil, context.DeadlineExceeded
+					})
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				var err error
+				w.In.Request, err = http.NewRequest("GET", "kube-https://my-app.test/aa/bb", nil)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.ExpOut.Response = nil
+				w.ExpOut.Err = context.DeadlineExceeded
+				w.ExpOut.ErrStr = "get ip addresses; namespace=\"test\" endpointsName=\"my-app\": get endpoints; namespace=\"test\" endpointsName=\"my-app\": context deadline exceeded"
 			}),
 	)
 }

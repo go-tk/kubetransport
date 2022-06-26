@@ -2,46 +2,48 @@ package kubetransport
 
 import (
 	"context"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"github.com/go-tk/kubetransport/internal/k8sclient"
 )
 
 type endpointsRegistry struct {
-	backgroundCtx   context.Context
-	endpointsGetter v1.EndpointsGetter
-	m               sync.Map
+	backgroundCtx    context.Context
+	close            func()
+	k8sClient        k8sclient.K8sClient
+	ipAddressesCache sync.Map
 }
 
-func newEndpointsRegistry(backgroundCtx context.Context, endpointsGetter v1.EndpointsGetter, tickPeriod time.Duration) *endpointsRegistry {
+func newEndpointsRegistry(backgroundCtx context.Context, k8sClient k8sclient.K8sClient, tickInterval time.Duration) *endpointsRegistry {
 	var er endpointsRegistry
-	er.backgroundCtx = backgroundCtx
-	er.endpointsGetter = endpointsGetter
-	go func() {
-		ticker := time.NewTicker(tickPeriod)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-backgroundCtx.Done():
-				return
-			case <-ticker.C:
-				er.clearIdleWatches()
-			}
-		}
-	}()
+	er.backgroundCtx, er.close = context.WithCancel(backgroundCtx)
+	er.k8sClient = k8sClient
+	go er.tick(tickInterval)
 	return &er
 }
 
-func (er *endpointsRegistry) clearIdleWatches() {
-	er.m.Range(func(_, value interface{}) bool {
-		if ipAddressesCache, ok := value.(*ipAddressesCache); ok {
-			if hitCount := atomic.LoadInt64(ipAddressesCache.HitCount); hitCount == 0 {
-				ipAddressesCache.Source.ClearWatch()
+func (er *endpointsRegistry) tick(tickInterval time.Duration) {
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-er.backgroundCtx.Done():
+			return
+		case <-ticker.C:
+			er.evictIPAddressesCache()
+		}
+	}
+}
+
+func (er *endpointsRegistry) evictIPAddressesCache() {
+	er.ipAddressesCache.Range(func(_, value interface{}) bool {
+		if cachedIPAddresses, ok := value.(*cachedIPAddresses); ok {
+			if hitCount := atomic.LoadInt64(&cachedIPAddresses.HitCount); hitCount == 0 {
+				cachedIPAddresses.Source.Close()
 			} else {
-				atomic.CompareAndSwapInt64(ipAddressesCache.HitCount, hitCount, 0)
+				atomic.CompareAndSwapInt64(&cachedIPAddresses.HitCount, hitCount, 0)
 			}
 		}
 		return true
@@ -49,13 +51,14 @@ func (er *endpointsRegistry) clearIdleWatches() {
 }
 
 func (er *endpointsRegistry) GetIPAddresses(ctx context.Context, namespace string, endpointsName string) ([]string, error) {
+	if namespace == "" {
+		namespace = er.k8sClient.Namespace()
+	}
 	endpointKey := endpointKey{namespace, endpointsName}
-	value, ok := er.m.Load(endpointKey)
+	value, ok := er.ipAddressesCache.Load(endpointKey)
 	if !ok {
-		results := getIPAddressesResults{
-			Waiter: make(chan struct{}),
-		}
-		value, ok = er.m.LoadOrStore(endpointKey, &results)
+		results := getIPAddressesResults{Waiter: make(chan struct{})}
+		value, ok = er.ipAddressesCache.LoadOrStore(endpointKey, &results)
 		if !ok {
 			er.doGetIPAddresses(endpointKey, &results)
 		}
@@ -69,85 +72,37 @@ func (er *endpointsRegistry) GetIPAddresses(ctx context.Context, namespace strin
 		case <-results.Waiter:
 			return results.IPAddresses, results.Err
 		}
-	case *ipAddressesCache:
-		ipAddressesCache := value
-		atomic.AddInt64(ipAddressesCache.HitCount, 1)
-		return ipAddressesCache.Value, nil
+	case *cachedIPAddresses:
+		cachedIPAddresses := value
+		atomic.AddInt64(&cachedIPAddresses.HitCount, 1)
+		return cachedIPAddresses.Value, nil
 	default:
 		panic("unreachable code")
 	}
 }
 
 func (er *endpointsRegistry) doGetIPAddresses(endpointKey endpointKey, results *getIPAddressesResults) {
-	ipAddressSource := newIPAddressSource(er.backgroundCtx, er.endpointsGetter, endpointKey.Namespace, endpointKey.EndpointsName)
-	hitCount := int64(1)
-	ipAddressSource.GetValuesAndSetWatch(func(ipAddresses []string, err error) {
+	ipAddressesCallback := func(ipAddressesSource *ipAddressesSource, ipAddresses []string, err error) {
 		if err == nil {
-			ipAddressesCache := ipAddressesCache{
-				Source:   ipAddressSource,
+			cachedIPAddresses := cachedIPAddresses{
+				Source:   ipAddressesSource,
 				Value:    ipAddresses,
-				HitCount: &hitCount,
+				HitCount: 1,
 			}
-			er.m.Store(endpointKey, &ipAddressesCache)
+			er.ipAddressesCache.Store(endpointKey, &cachedIPAddresses)
 		} else {
-			er.m.Delete(endpointKey)
+			er.ipAddressesCache.Delete(endpointKey)
 		}
 		if results != nil {
 			results.IPAddresses, results.Err = ipAddresses, err
 			close(results.Waiter)
 			results = nil
 		}
-	})
-}
-
-type endpointsRegistryState struct {
-	IPAddressesCacheInfos []ipAddressesCacheInfo
-}
-
-type ipAddressesCacheInfo struct {
-	Value    []string
-	HitCount int64
-}
-
-func (er *endpointsRegistry) State() endpointsRegistryState {
-	var ipAddressesCacheInfos []ipAddressesCacheInfo
-	er.m.Range(func(_, value interface{}) bool {
-		ipAddressesCache, ok := value.(*ipAddressesCache)
-		if !ok {
-			return true
-		}
-		ipAddressesCacheInfo := ipAddressesCacheInfo{
-			Value:    ipAddressesCache.Value,
-			HitCount: atomic.LoadInt64(ipAddressesCache.HitCount),
-		}
-		ipAddressesCacheInfos = append(ipAddressesCacheInfos, ipAddressesCacheInfo)
-		return true
-	})
-	sort.Slice(ipAddressesCacheInfos, func(i, j int) bool {
-		return stringSliceIsLess(ipAddressesCacheInfos[i].Value, ipAddressesCacheInfos[j].Value)
-	})
-	state := endpointsRegistryState{
-		IPAddressesCacheInfos: ipAddressesCacheInfos,
 	}
-	return state
+	newIPAddressesSource(er.backgroundCtx, er.k8sClient, endpointKey.Namespace, endpointKey.EndpointsName, ipAddressesCallback)
 }
 
-func stringSliceIsLess(a, b []string) bool {
-	n1 := len(a)
-	n2 := len(b)
-	var n int
-	if n1 < n2 {
-		n = n1
-	} else {
-		n = n2
-	}
-	for i := 0; i < n; i++ {
-		if a[i] != b[i] {
-			return a[i] < b[i]
-		}
-	}
-	return n1 < n2
-}
+func (er *endpointsRegistry) Close() { er.close() }
 
 type endpointKey struct {
 	Namespace     string
@@ -160,8 +115,8 @@ type getIPAddressesResults struct {
 	Err         error
 }
 
-type ipAddressesCache struct {
-	Source   *ipAddressSource
+type cachedIPAddresses struct {
+	Source   *ipAddressesSource
 	Value    []string
-	HitCount *int64
+	HitCount int64
 }

@@ -2,513 +2,994 @@ package k8sclient_test
 
 import (
 	"context"
-	"net/url"
+	"errors"
+	"io"
+	"net/http"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/adammck/venv"
 	"github.com/benbjohnson/clock"
 	. "github.com/go-tk/kubetransport/internal/k8sclient"
-	"github.com/go-tk/vk8s"
+	"github.com/go-tk/testcase"
+	"github.com/jarcoal/httpmock"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
-	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
-func TestK8sClient(t *testing.T) {
-	te := prepareTestingEnvironment(t)
-	t.Run("GetEndpoints", func(t *testing.T) { testK8sClient_GetEndpoints(t, te) })
-	t.Run("WatchEndpoints", func(t *testing.T) { testK8sClient_WatchEndpoints(t, te) })
+func TestDoNew(t *testing.T) {
+	type Workspace struct {
+		In struct {
+			Fs        afero.Fs
+			Env       venv.Env
+			MockClock *clock.Mock
+		}
+		ExpOut, ActOut struct {
+			Err    error
+			ErrStr string
+		}
+		KC K8sClient
+	}
+	tc := testcase.New().
+		Step(0, func(t *testing.T, w *Workspace) {
+			w.In.Fs = afero.NewMemMapFs()
+			w.In.Env = venv.Mock()
+			w.In.MockClock = clock.NewMock()
+			w.In.MockClock.Set(time.Now())
+		}).
+		Step(1, func(t *testing.T, w *Workspace) {
+			w.KC, w.ActOut.Err = DoNew(w.In.Fs, DummyTransportReplacer, w.In.Env, w.In.MockClock)
+			if w.ActOut.Err != nil {
+				w.ActOut.ErrStr = w.ActOut.Err.Error()
+			}
+		}).
+		Step(2, func(t *testing.T, w *Workspace) {
+			if w.ExpOut.Err == nil || errors.Is(w.ActOut.Err, w.ExpOut.Err) {
+				w.ExpOut.Err = w.ActOut.Err
+			}
+			assert.Equal(t, w.ExpOut, w.ActOut)
+		})
+	testcase.RunListParallel(t,
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.ExpOut.Err = os.ErrNotExist
+				w.ExpOut.ErrStr = "read ca certificate file; filePath=\"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt\": open /var/run/secrets/kubernetes.io/serviceaccount/ca.crt: file does not exist"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				err := afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+					[]byte("CCAA"),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.ExpOut.ErrStr = "can't add ca certificate"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				err := afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+					[]byte(`-----BEGIN CERTIFICATE-----
+MIIBdzCCAR2gAwIBAgIBADAKBggqhkjOPQQDAjAjMSEwHwYDVQQDDBhrM3Mtc2Vy
+dmVyLWNhQDE2MjM1MDQ5MDYwHhcNMjEwNjEyMTMzNTA2WhcNMzEwNjEwMTMzNTA2
+WjAjMSEwHwYDVQQDDBhrM3Mtc2VydmVyLWNhQDE2MjM1MDQ5MDYwWTATBgcqhkjO
+PQIBBggqhkjOPQMBBwNCAAQ3qTr0SbaK0a7zf8LqavDZsV0dwTvXTnmkDa4DJ7XZ
+/zU1E1rBuCeJ4hmqnLB97k5ePamOrFEcQljOI27+2/2Qo0IwQDAOBgNVHQ8BAf8E
+BAMCAqQwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUmAS4j2mFkRsIbhk2FlrO
++9eFeKswCgYIKoZIzj0EAwIDSAAwRQIgH6sg05GpW0gOrVySsQgO5LD3ythEfJte
+lO/HJTzVSS8CIQCySRrL0DQOyd2PYzqPvUq7XHuiIfRqLtLOP4+j7fDGDQ==
+-----END CERTIFICATE-----
+`),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.ExpOut.ErrStr = "can't find environment variable KUBERNETES_SERVICE_HOST"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				err := afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+					[]byte(`-----BEGIN CERTIFICATE-----
+MIIBdzCCAR2gAwIBAgIBADAKBggqhkjOPQQDAjAjMSEwHwYDVQQDDBhrM3Mtc2Vy
+dmVyLWNhQDE2MjM1MDQ5MDYwHhcNMjEwNjEyMTMzNTA2WhcNMzEwNjEwMTMzNTA2
+WjAjMSEwHwYDVQQDDBhrM3Mtc2VydmVyLWNhQDE2MjM1MDQ5MDYwWTATBgcqhkjO
+PQIBBggqhkjOPQMBBwNCAAQ3qTr0SbaK0a7zf8LqavDZsV0dwTvXTnmkDa4DJ7XZ
+/zU1E1rBuCeJ4hmqnLB97k5ePamOrFEcQljOI27+2/2Qo0IwQDAOBgNVHQ8BAf8E
+BAMCAqQwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUmAS4j2mFkRsIbhk2FlrO
++9eFeKswCgYIKoZIzj0EAwIDSAAwRQIgH6sg05GpW0gOrVySsQgO5LD3ythEfJte
+lO/HJTzVSS8CIQCySRrL0DQOyd2PYzqPvUq7XHuiIfRqLtLOP4+j7fDGDQ==
+-----END CERTIFICATE-----
+`),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.In.Env.Setenv("KUBERNETES_SERVICE_HOST", "1.1.1.1")
+				w.ExpOut.ErrStr = "can't find environment variable KUBERNETES_SERVICE_PORT"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				err := afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+					[]byte(`-----BEGIN CERTIFICATE-----
+MIIBdzCCAR2gAwIBAgIBADAKBggqhkjOPQQDAjAjMSEwHwYDVQQDDBhrM3Mtc2Vy
+dmVyLWNhQDE2MjM1MDQ5MDYwHhcNMjEwNjEyMTMzNTA2WhcNMzEwNjEwMTMzNTA2
+WjAjMSEwHwYDVQQDDBhrM3Mtc2VydmVyLWNhQDE2MjM1MDQ5MDYwWTATBgcqhkjO
+PQIBBggqhkjOPQMBBwNCAAQ3qTr0SbaK0a7zf8LqavDZsV0dwTvXTnmkDa4DJ7XZ
+/zU1E1rBuCeJ4hmqnLB97k5ePamOrFEcQljOI27+2/2Qo0IwQDAOBgNVHQ8BAf8E
+BAMCAqQwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUmAS4j2mFkRsIbhk2FlrO
++9eFeKswCgYIKoZIzj0EAwIDSAAwRQIgH6sg05GpW0gOrVySsQgO5LD3ythEfJte
+lO/HJTzVSS8CIQCySRrL0DQOyd2PYzqPvUq7XHuiIfRqLtLOP4+j7fDGDQ==
+-----END CERTIFICATE-----
+`),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.In.Env.Setenv("KUBERNETES_SERVICE_HOST", "1.1.1.1")
+				w.In.Env.Setenv("KUBERNETES_SERVICE_PORT", "443")
+				w.ExpOut.Err = os.ErrNotExist
+				w.ExpOut.ErrStr = "read namespace file; filePath=\"/var/run/secrets/kubernetes.io/serviceaccount/namespace\": open /var/run/secrets/kubernetes.io/serviceaccount/namespace: file does not exist"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				err := afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+					[]byte(`-----BEGIN CERTIFICATE-----
+MIIBdzCCAR2gAwIBAgIBADAKBggqhkjOPQQDAjAjMSEwHwYDVQQDDBhrM3Mtc2Vy
+dmVyLWNhQDE2MjM1MDQ5MDYwHhcNMjEwNjEyMTMzNTA2WhcNMzEwNjEwMTMzNTA2
+WjAjMSEwHwYDVQQDDBhrM3Mtc2VydmVyLWNhQDE2MjM1MDQ5MDYwWTATBgcqhkjO
+PQIBBggqhkjOPQMBBwNCAAQ3qTr0SbaK0a7zf8LqavDZsV0dwTvXTnmkDa4DJ7XZ
+/zU1E1rBuCeJ4hmqnLB97k5ePamOrFEcQljOI27+2/2Qo0IwQDAOBgNVHQ8BAf8E
+BAMCAqQwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUmAS4j2mFkRsIbhk2FlrO
++9eFeKswCgYIKoZIzj0EAwIDSAAwRQIgH6sg05GpW0gOrVySsQgO5LD3ythEfJte
+lO/HJTzVSS8CIQCySRrL0DQOyd2PYzqPvUq7XHuiIfRqLtLOP4+j7fDGDQ==
+-----END CERTIFICATE-----
+`),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.In.Env.Setenv("KUBERNETES_SERVICE_HOST", "1.1.1.1")
+				w.In.Env.Setenv("KUBERNETES_SERVICE_PORT", "443")
+				err = afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+					[]byte("foo"),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.ExpOut.Err = os.ErrNotExist
+				w.ExpOut.ErrStr = "get token: read token file; filePath=\"/var/run/secrets/kubernetes.io/serviceaccount/token\": open /var/run/secrets/kubernetes.io/serviceaccount/token: file does not exist"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				err := afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+					[]byte(`-----BEGIN CERTIFICATE-----
+MIIBdzCCAR2gAwIBAgIBADAKBggqhkjOPQQDAjAjMSEwHwYDVQQDDBhrM3Mtc2Vy
+dmVyLWNhQDE2MjM1MDQ5MDYwHhcNMjEwNjEyMTMzNTA2WhcNMzEwNjEwMTMzNTA2
+WjAjMSEwHwYDVQQDDBhrM3Mtc2VydmVyLWNhQDE2MjM1MDQ5MDYwWTATBgcqhkjO
+PQIBBggqhkjOPQMBBwNCAAQ3qTr0SbaK0a7zf8LqavDZsV0dwTvXTnmkDa4DJ7XZ
+/zU1E1rBuCeJ4hmqnLB97k5ePamOrFEcQljOI27+2/2Qo0IwQDAOBgNVHQ8BAf8E
+BAMCAqQwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUmAS4j2mFkRsIbhk2FlrO
++9eFeKswCgYIKoZIzj0EAwIDSAAwRQIgH6sg05GpW0gOrVySsQgO5LD3ythEfJte
+lO/HJTzVSS8CIQCySRrL0DQOyd2PYzqPvUq7XHuiIfRqLtLOP4+j7fDGDQ==
+-----END CERTIFICATE-----
+`),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.In.Env.Setenv("KUBERNETES_SERVICE_HOST", "1.1.1.1")
+				w.In.Env.Setenv("KUBERNETES_SERVICE_PORT", "443")
+				err = afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+					[]byte("foo"),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				err = afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/token",
+					[]byte("bar"),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+			}),
+	)
 }
 
-func testK8sClient_GetEndpoints(t *testing.T, te *testingEnvironment) {
-	kc, err := DoNew(te.Fs, te.Env, te.Clock)
-	if err != nil {
-		t.Fatal(err)
+func TestK8sClient_GetEndpoints(t *testing.T) {
+	type Workspace struct {
+		Init struct {
+			Fs            afero.Fs
+			MockTransport *httpmock.MockTransport
+			Env           venv.Env
+			MockClock     *clock.Mock
+		}
+		In struct {
+			Ctx           context.Context
+			Namespace     string
+			EndpointsName string
+		}
+		ExpOut, ActOut struct {
+			Endpoints *Endpoints
+			Err       error
+			ErrStr    string
+		}
+		KC K8sClient
 	}
-
-	{
-		endpoints, err := kc.GetEndpoints(context.Background(), "", "abc")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !assert.Nil(t, endpoints) {
-			t.FailNow()
-		}
-		endpoints, err = kc.GetEndpoints(context.Background(), "default", "abc")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !assert.Nil(t, endpoints) {
-			t.FailNow()
-		}
-	}
-
-	{
-		endpoints, err := te.Clientset.CoreV1().Endpoints("default").Create(
-			context.Background(),
-			&corev1.Endpoints{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "abc",
-				},
-				Subsets: []corev1.EndpointSubset{
-					{
-						Addresses: []corev1.EndpointAddress{
-							{IP: "1.2.3.4"},
-							{IP: "3.4.5.6"},
-						},
-					},
-					{
-						Addresses: []corev1.EndpointAddress{
-							{IP: "6.6.6.6"},
-							{IP: "7.7.7.7"},
-						},
-					},
-				},
-			},
-			metav1.CreateOptions{},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		endpoints1, err := kc.GetEndpoints(context.Background(), "", "abc")
-		if err != nil {
-			t.Fatal(err)
-		}
-		endpoints2, err := kc.GetEndpoints(context.Background(), "default", "abc")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !assert.Equal(t, endpoints1, endpoints2) {
-			t.FailNow()
-		}
-		if !assert.Equal(t, &Endpoints{
-			Metadata: Metadata{
-				ResourceVersion: endpoints.ResourceVersion,
-			},
-			Subsets: []EndpointSubset{
-				{
-					Addresses: []EndpointAddress{
-						{IP: "1.2.3.4"},
-						{IP: "3.4.5.6"},
-					},
-				},
-				{
-					Addresses: []EndpointAddress{
-						{IP: "6.6.6.6"},
-						{IP: "7.7.7.7"},
-					},
-				},
-			},
-		}, endpoints1) {
-			t.FailNow()
-		}
-	}
-
-	{
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		_, err := kc.GetEndpoints(ctx, "", "abcd")
-		if !assert.ErrorIs(t, err, context.Canceled) {
-			t.FailNow()
-		}
-	}
-}
-
-func testK8sClient_WatchEndpoints(t *testing.T, te *testingEnvironment) {
-	kc, err := DoNew(te.Fs, te.Env, te.Clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	{
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_ = cancel
-		var f bool
-		err := kc.WatchEndpoints(ctx, "default", "xyz", "", func(EventType, *Endpoints) bool {
-			f = true
-			return true
+	tc := testcase.New().
+		Step(0, func(t *testing.T, w *Workspace) {
+			w.Init.Fs = afero.NewMemMapFs()
+			w.Init.MockTransport = httpmock.NewMockTransport()
+			w.Init.Env = venv.Mock()
+			w.Init.MockClock = clock.NewMock()
+			w.Init.MockClock.Set(time.Now())
+			w.In.Ctx = context.Background()
+			err := afero.WriteFile(
+				w.Init.Fs,
+				"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+				[]byte(`-----BEGIN CERTIFICATE-----
+MIIBdzCCAR2gAwIBAgIBADAKBggqhkjOPQQDAjAjMSEwHwYDVQQDDBhrM3Mtc2Vy
+dmVyLWNhQDE2MjM1MDQ5MDYwHhcNMjEwNjEyMTMzNTA2WhcNMzEwNjEwMTMzNTA2
+WjAjMSEwHwYDVQQDDBhrM3Mtc2VydmVyLWNhQDE2MjM1MDQ5MDYwWTATBgcqhkjO
+PQIBBggqhkjOPQMBBwNCAAQ3qTr0SbaK0a7zf8LqavDZsV0dwTvXTnmkDa4DJ7XZ
+/zU1E1rBuCeJ4hmqnLB97k5ePamOrFEcQljOI27+2/2Qo0IwQDAOBgNVHQ8BAf8E
+BAMCAqQwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUmAS4j2mFkRsIbhk2FlrO
++9eFeKswCgYIKoZIzj0EAwIDSAAwRQIgH6sg05GpW0gOrVySsQgO5LD3ythEfJte
+lO/HJTzVSS8CIQCySRrL0DQOyd2PYzqPvUq7XHuiIfRqLtLOP4+j7fDGDQ==
+-----END CERTIFICATE-----
+`),
+				644,
+			)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			w.Init.Env.Setenv("KUBERNETES_SERVICE_HOST", "1.2.3.4")
+			w.Init.Env.Setenv("KUBERNETES_SERVICE_PORT", "6443")
+			err = afero.WriteFile(
+				w.Init.Fs,
+				"/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+				[]byte("default"),
+				644,
+			)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			err = afero.WriteFile(
+				w.Init.Fs,
+				"/var/run/secrets/kubernetes.io/serviceaccount/token",
+				[]byte("admin"),
+				644,
+			)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+		}).
+		Step(1, func(t *testing.T, w *Workspace) {
+			var err error
+			w.KC, err = DoNew(w.Init.Fs, func(http.RoundTripper) http.RoundTripper { return w.Init.MockTransport }, w.Init.Env, w.Init.MockClock)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+		}).
+		Step(2, func(t *testing.T, w *Workspace) {
+			w.ActOut.Endpoints, w.ActOut.Err = w.KC.GetEndpoints(w.In.Ctx, w.In.Namespace, w.In.EndpointsName)
+			if w.ActOut.Err != nil {
+				w.ActOut.ErrStr = w.ActOut.Err.Error()
+			}
+		}).
+		Step(3, func(t *testing.T, w *Workspace) {
+			if w.ExpOut.Err == nil || errors.Is(w.ActOut.Err, w.ExpOut.Err) {
+				w.ExpOut.Err = w.ActOut.Err
+			}
+			assert.Equal(t, w.ExpOut, w.ActOut)
 		})
-		if !assert.ErrorIs(t, err, context.DeadlineExceeded) {
-			t.FailNow()
-		}
-		if !assert.False(t, f) {
-			t.FailNow()
-		}
-	}
-
-	{
-		go func() {
-			time.Sleep(time.Second)
-			if _, err := te.Clientset.CoreV1().Endpoints("default").Create(
-				context.Background(),
-				&corev1.Endpoints{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "xyz",
-					},
-					Subsets: []corev1.EndpointSubset{
-						{
-							Addresses: []corev1.EndpointAddress{
-								{IP: "1.2.3.4"},
-								{IP: "3.4.5.6"},
-							},
-						},
-						{
-							Addresses: []corev1.EndpointAddress{
-								{IP: "6.6.6.6"},
-								{IP: "7.7.7.7"},
-							},
-						},
-					},
-				},
-				metav1.CreateOptions{},
-			); err != nil {
-				t.Error(err)
-				return
-			}
-			if _, err := te.Clientset.CoreV1().Endpoints("default").Update(
-				context.Background(),
-				&corev1.Endpoints{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "xyz",
-					},
-					Subsets: []corev1.EndpointSubset{
-						{
-							Addresses: []corev1.EndpointAddress{
-								{IP: "1.1.1.1"},
-							},
-						},
-						{
-							Addresses: []corev1.EndpointAddress{
-								{IP: "2.2.2.2"},
-							},
-						},
-					},
-				},
-				metav1.UpdateOptions{},
-			); err != nil {
-				t.Error(err)
-				return
-			}
-			if err := te.Clientset.CoreV1().Endpoints("default").Delete(
-				context.Background(),
-				"xyz",
-				metav1.DeleteOptions{},
-			); err != nil {
-				t.Error(err)
-				return
-			}
-			if _, err := te.Clientset.CoreV1().Endpoints("default").Create(
-				context.Background(),
-				&corev1.Endpoints{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "xyz",
-					},
-					Subsets: []corev1.EndpointSubset{
-						{
-							Addresses: []corev1.EndpointAddress{
-								{IP: "10.10.10.10"},
-							},
-						},
-					},
-				},
-				metav1.CreateOptions{},
-			); err != nil {
-				t.Error(err)
-				return
-			}
-		}()
-		n := 0
-		err := kc.WatchEndpoints(context.Background(), "default", "xyz", "", func(eventType EventType, endpoints *Endpoints) bool {
-			n++
-			var expectedEventType EventType
-			var expectedEndpoints *Endpoints
-			switch n {
-			case 1:
-				expectedEventType = EventAdded
-				expectedEndpoints = &Endpoints{
-					Metadata: Metadata{
-						ResourceVersion: endpoints.Metadata.ResourceVersion,
-					},
-					Subsets: []EndpointSubset{
-						{
-							Addresses: []EndpointAddress{
-								{IP: "1.2.3.4"},
-								{IP: "3.4.5.6"},
-							},
-						},
-						{
-							Addresses: []EndpointAddress{
-								{IP: "6.6.6.6"},
-								{IP: "7.7.7.7"},
-							},
-						},
-					},
-				}
-			case 2:
-				expectedEventType = EventModified
-				expectedEndpoints = &Endpoints{
-					Metadata: Metadata{
-						ResourceVersion: endpoints.Metadata.ResourceVersion,
-					},
-					Subsets: []EndpointSubset{
-						{
-							Addresses: []EndpointAddress{
-								{IP: "1.1.1.1"},
-							},
-						},
-						{
-							Addresses: []EndpointAddress{
-								{IP: "2.2.2.2"},
-							},
-						},
-					},
-				}
-			case 3:
-				expectedEventType = EventDeleted
-				expectedEndpoints = &Endpoints{
-					Metadata: Metadata{
-						ResourceVersion: endpoints.Metadata.ResourceVersion,
-					},
-					Subsets: []EndpointSubset{
-						{
-							Addresses: []EndpointAddress{
-								{IP: "1.1.1.1"},
-							},
-						},
-						{
-							Addresses: []EndpointAddress{
-								{IP: "2.2.2.2"},
-							},
-						},
-					},
-				}
-			case 4:
-				expectedEventType = EventAdded
-				expectedEndpoints = &Endpoints{
-					Metadata: Metadata{
-						ResourceVersion: endpoints.Metadata.ResourceVersion,
-					},
-					Subsets: []EndpointSubset{
-						{
-							Addresses: []EndpointAddress{
-								{IP: "10.10.10.10"},
-							},
-						},
-					},
-				}
-			}
-			if !assert.Equal(t, expectedEventType, eventType) {
-				t.FailNow()
-			}
-			if !assert.Equal(t, expectedEndpoints, endpoints) {
-				t.FailNow()
-			}
-			return n < 4
-		})
-		if !assert.NoError(t, err) {
-			t.FailNow()
-		}
-	}
-
-	{
-		if _, err := te.Clientset.CoreV1().Endpoints("default").Create(
-			context.Background(),
-			&corev1.Endpoints{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "ijk",
-				},
-				Subsets: []corev1.EndpointSubset{
-					{
-						Addresses: []corev1.EndpointAddress{
-							{IP: "10.10.10.10"},
-						},
-					},
-				},
-			},
-			metav1.CreateOptions{},
-		); err != nil {
-			t.Error(err)
-			return
-		}
-		endpoints, err := kc.GetEndpoints(context.Background(), "", "ijk")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !assert.NotNil(t, endpoints) {
-			t.FailNow()
-		}
-		err = kc.WatchEndpoints(context.Background(), "default", "ijk", "", func(eventType EventType, endpoints *Endpoints) bool {
-			if !assert.Equal(t, EventAdded, eventType) {
-				t.FailNow()
-			}
-			if !assert.Equal(t, &Endpoints{
-				Metadata: Metadata{
-					ResourceVersion: endpoints.Metadata.ResourceVersion,
-				},
-				Subsets: []EndpointSubset{
-					{
-						Addresses: []EndpointAddress{
-							{IP: "10.10.10.10"},
-						},
-					},
-				},
-			}, endpoints) {
-				t.FailNow()
-			}
-			return false
-		})
-		if !assert.NoError(t, err) {
-			t.FailNow()
-		}
-		go func() {
-			time.Sleep(time.Second)
-			if _, err := te.Clientset.CoreV1().Endpoints("default").Update(
-				context.Background(),
-				&corev1.Endpoints{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "ijk",
-					},
-					Subsets: []corev1.EndpointSubset{
-						{
-							Addresses: []corev1.EndpointAddress{
-								{IP: "11.11.11.11"},
-							},
-						},
-					},
-				},
-				metav1.UpdateOptions{},
-			); err != nil {
-				t.Error(err)
-				return
-			}
-		}()
-		err = kc.WatchEndpoints(context.Background(), "default", "ijk", endpoints.Metadata.ResourceVersion, func(eventType EventType, endpoints *Endpoints) bool {
-			if !assert.Equal(t, EventModified, eventType) {
-				t.FailNow()
-			}
-			if !assert.Equal(t, &Endpoints{
-				Metadata: Metadata{
-					ResourceVersion: endpoints.Metadata.ResourceVersion,
-				},
-				Subsets: []EndpointSubset{
-					{
-						Addresses: []EndpointAddress{
-							{IP: "11.11.11.11"},
-						},
-					},
-				},
-			}, endpoints) {
-				t.FailNow()
-			}
-			return false
-		})
-		if !assert.NoError(t, err) {
-			t.FailNow()
-		}
-	}
-}
-
-type testingEnvironment struct {
-	Clientset *kubernetes.Clientset
-	Fs        afero.Fs
-	Env       venv.Env
-	Clock     clock.Clock
-}
-
-func prepareTestingEnvironment(t *testing.T) *testingEnvironment {
-	kubeConfigData := vk8s.SetUp(context.Background(), 5*time.Minute, t)
-	config, err := clientcmd.RESTConfigFromKubeConfig(kubeConfigData)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := clientset.RbacV1().ClusterRoles().Create(
-		context.Background(),
-		&rbacv1.ClusterRole{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "endpoints-reader",
-			},
-			Rules: []rbacv1.PolicyRule{{
-				APIGroups: []string{""},
-				Resources: []string{"endpoints"},
-				Verbs:     []string{"get", "watch"},
-			}},
+	testcase.RunListParallel(t,
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/namespaces/foo/endpoints/bar",
+					httpmock.NewBytesResponder(404, nil),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/namespaces/foo/endpoints/bar",
+					httpmock.NewStringResponder(200, `{
+	"metadata": {
+		"resourceVersion": "8910"
+	},
+	"subsets": [
+		{
+			"addresses": [
+				{"ip": "1.2.3.4"},
+				{"ip": "2.3.4.5"}
+			]
 		},
-		metav1.CreateOptions{},
-	); err != nil {
-		t.Fatal(err)
+		{
+			"addresses": [
+				{"ip": "7.7.7.7"},
+				{"ip": "8.8.8.8"}
+			]
+		}
+	]
+}
+`),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.ExpOut.Endpoints = &Endpoints{
+					Metadata: Metadata{
+						ResourceVersion: "8910",
+					},
+					Subsets: []EndpointSubset{
+						{
+							Addresses: []EndpointAddress{
+								{IP: "1.2.3.4"},
+								{IP: "2.3.4.5"},
+							},
+						},
+						{
+							Addresses: []EndpointAddress{
+								{IP: "7.7.7.7"},
+								{IP: "8.8.8.8"},
+							},
+						},
+					},
+				}
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/namespaces/foo/endpoints/bar",
+					httpmock.NewBytesResponder(500, nil),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.ExpOut.ErrStr = "get \"https://1.2.3.4:6443/api/v1/namespaces/foo/endpoints/bar\"; statusCode=500"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/namespaces/foo/endpoints/bar",
+					httpmock.NewStringResponder(200, "[]"),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.ExpOut.ErrStr = "decode endpoints json: json: cannot unmarshal array into Go value of type k8sclient.Endpoints"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/namespaces/foo/endpoints/bar",
+					httpmock.NewBytesResponder(401, nil),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				_, err := w.KC.GetEndpoints(context.Background(), "foo", "bar")
+				if !assert.Error(t, err) {
+					t.FailNow()
+				}
+				err = w.Init.Fs.Remove("/var/run/secrets/kubernetes.io/serviceaccount/token")
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.ExpOut.ErrStr = "get token: read token file; filePath=\"/var/run/secrets/kubernetes.io/serviceaccount/token\": open /var/run/secrets/kubernetes.io/serviceaccount/token: file does not exist"
+			}),
+	)
+}
+
+func TestK8sClient_WatchEndpoints(t *testing.T) {
+	type CallbackArgs struct {
+		EventType EventType
+		Endpoints *Endpoints
 	}
-	if _, err := clientset.RbacV1().ClusterRoleBindings().Create(
-		context.Background(),
-		&rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "endpoints-reader",
-			},
-			Subjects: []rbacv1.Subject{
-				{
-					Kind:      "ServiceAccount",
-					Name:      "default",
-					Namespace: metav1.NamespaceDefault,
-				},
-			},
-			RoleRef: rbacv1.RoleRef{
-				APIGroup: "rbac.authorization.k8s.io",
-				Kind:     "ClusterRole",
-				Name:     "endpoints-reader",
-			},
+	type Workspace struct {
+		Init struct {
+			Fs            afero.Fs
+			MockTransport *httpmock.MockTransport
+			Env           venv.Env
+			MockClock     *clock.Mock
+		}
+		In struct {
+			Ctx             context.Context
+			Namespace       string
+			EndpointsName   string
+			ResourceVersion string
+		}
+		ExpOut, ActOut struct {
+			CAs    []CallbackArgs
+			Err    error
+			ErrStr string
+		}
+		KC K8sClient
+	}
+	tc := testcase.New().
+		Step(0, func(t *testing.T, w *Workspace) {
+			w.Init.Fs = afero.NewMemMapFs()
+			w.Init.MockTransport = httpmock.NewMockTransport()
+			w.Init.Env = venv.Mock()
+			w.Init.MockClock = clock.NewMock()
+			w.Init.MockClock.Set(time.Now())
+			w.In.Ctx = context.Background()
+			err := afero.WriteFile(
+				w.Init.Fs,
+				"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+				[]byte(`-----BEGIN CERTIFICATE-----
+MIIBdzCCAR2gAwIBAgIBADAKBggqhkjOPQQDAjAjMSEwHwYDVQQDDBhrM3Mtc2Vy
+dmVyLWNhQDE2MjM1MDQ5MDYwHhcNMjEwNjEyMTMzNTA2WhcNMzEwNjEwMTMzNTA2
+WjAjMSEwHwYDVQQDDBhrM3Mtc2VydmVyLWNhQDE2MjM1MDQ5MDYwWTATBgcqhkjO
+PQIBBggqhkjOPQMBBwNCAAQ3qTr0SbaK0a7zf8LqavDZsV0dwTvXTnmkDa4DJ7XZ
+/zU1E1rBuCeJ4hmqnLB97k5ePamOrFEcQljOI27+2/2Qo0IwQDAOBgNVHQ8BAf8E
+BAMCAqQwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUmAS4j2mFkRsIbhk2FlrO
++9eFeKswCgYIKoZIzj0EAwIDSAAwRQIgH6sg05GpW0gOrVySsQgO5LD3ythEfJte
+lO/HJTzVSS8CIQCySRrL0DQOyd2PYzqPvUq7XHuiIfRqLtLOP4+j7fDGDQ==
+-----END CERTIFICATE-----
+`),
+				644,
+			)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			w.Init.Env.Setenv("KUBERNETES_SERVICE_HOST", "1.2.3.4")
+			w.Init.Env.Setenv("KUBERNETES_SERVICE_PORT", "6443")
+			err = afero.WriteFile(
+				w.Init.Fs,
+				"/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+				[]byte("default"),
+				644,
+			)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			err = afero.WriteFile(
+				w.Init.Fs,
+				"/var/run/secrets/kubernetes.io/serviceaccount/token",
+				[]byte("admin"),
+				644,
+			)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+		}).
+		Step(1, func(t *testing.T, w *Workspace) {
+			var err error
+			w.KC, err = DoNew(w.Init.Fs, func(http.RoundTripper) http.RoundTripper { return w.Init.MockTransport }, w.Init.Env, w.Init.MockClock)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+		}).
+		Step(2, func(t *testing.T, w *Workspace) {
+			w.ActOut.Err = w.KC.WatchEndpoints(w.In.Ctx, w.In.Namespace, w.In.EndpointsName, w.In.ResourceVersion, func(eventType EventType, endpoints *Endpoints) bool {
+				w.ActOut.CAs = append(w.ActOut.CAs, CallbackArgs{EventType: eventType, Endpoints: endpoints})
+				return true
+			})
+			if w.ActOut.Err != nil {
+				w.ActOut.ErrStr = w.ActOut.Err.Error()
+			}
+		}).
+		Step(3, func(t *testing.T, w *Workspace) {
+			if w.ExpOut.Err == nil || errors.Is(w.ActOut.Err, w.ExpOut.Err) {
+				w.ExpOut.Err = w.ActOut.Err
+			}
+			assert.Equal(t, w.ExpOut, w.ActOut)
+		})
+	testcase.RunListParallel(t,
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar",
+					httpmock.NewStringResponder(200, `{
+	"type": "ADDED",
+	"object": {
+		"metadata": {
+			"resourceVersion": "8910"
 		},
-		metav1.CreateOptions{},
-	); err != nil {
-		t.Fatal(err)
+		"subsets": [
+			{
+				"addresses": [
+					{"ip": "1.2.3.4"},
+					{"ip": "2.3.4.5"}
+				]
+			},
+			{
+				"addresses": [
+					{"ip": "7.7.7.7"},
+					{"ip": "8.8.8.8"}
+				]
+			}
+		]
 	}
-	serviceAccount, err := clientset.CoreV1().ServiceAccounts(metav1.NamespaceDefault).Get(context.Background(), "default", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
+}
+{
+	"type": "DELETED",
+	"object": {
+		"metadata": {
+			"resourceVersion": "8920"
+		},
+		"subsets": [
+			{
+				"addresses": [
+					{"ip": "9.9.9.9"}
+				]
+			}
+		]
 	}
-	secretName := serviceAccount.Secrets[0].Name
-	secret, err := clientset.CoreV1().Secrets(metav1.NamespaceDefault).Get(context.Background(), secretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
+}
+`),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.ExpOut.CAs = []CallbackArgs{
+					{
+						EventType: EventAdded,
+						Endpoints: &Endpoints{
+							Metadata: Metadata{
+								ResourceVersion: "8910",
+							},
+							Subsets: []EndpointSubset{
+								{
+									Addresses: []EndpointAddress{
+										{IP: "1.2.3.4"},
+										{IP: "2.3.4.5"},
+									},
+								},
+								{
+									Addresses: []EndpointAddress{
+										{IP: "7.7.7.7"},
+										{IP: "8.8.8.8"},
+									},
+								},
+							},
+						},
+					},
+					{
+						EventType: EventDeleted,
+						Endpoints: &Endpoints{
+							Metadata: Metadata{
+								ResourceVersion: "8920",
+							},
+							Subsets: []EndpointSubset{
+								{
+									Addresses: []EndpointAddress{
+										{IP: "9.9.9.9"},
+									},
+								},
+							},
+						},
+					},
+				}
+				w.ExpOut.Err = io.EOF
+				w.ExpOut.ErrStr = "decode event json: EOF"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar",
+					httpmock.NewBytesResponder(500, nil),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.ExpOut.ErrStr = "get \"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar\"; statusCode=500"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar",
+					httpmock.NewStringResponder(200, `{
+	"type": "ADDED",
+	"object": {
+		"metadata": {
+			"resourceVersion": "8910"
+		},
+		"subsets": [{"addresses": [{"ip": "1.2.3.4"}]}]
 	}
+}
+{
+	"type": 100
+}
+`),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.ExpOut.CAs = []CallbackArgs{
+					{
+						EventType: EventAdded,
+						Endpoints: &Endpoints{
+							Metadata: Metadata{
+								ResourceVersion: "8910",
+							},
+							Subsets: []EndpointSubset{
+								{
+									Addresses: []EndpointAddress{
+										{IP: "1.2.3.4"},
+									},
+								},
+							},
+						},
+					},
+				}
+				w.ExpOut.ErrStr = "decode event json: json: cannot unmarshal number into Go struct field .type of type k8sclient.EventType"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar",
+					httpmock.NewStringResponder(200, `{
+	"type": "ADDED",
+	"object": {
+		"metadata": {
+			"resourceVersion": "8910"
+		},
+		"subsets": [{"addresses": [{"ip": "1.2.3.4"}]}]
+	}
+}
+{
+	"type": "ADDED",
+	"object": {
+		"metadata": {
+			"resourceVersion": "8910"
+		},
+		"subsets": [{"addresses": "1.1.1.1,2.2.2.2,3.3.3.3"}]
+	}
+}
+`),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.ExpOut.CAs = []CallbackArgs{
+					{
+						EventType: EventAdded,
+						Endpoints: &Endpoints{
+							Metadata: Metadata{
+								ResourceVersion: "8910",
+							},
+							Subsets: []EndpointSubset{
+								{
+									Addresses: []EndpointAddress{
+										{IP: "1.2.3.4"},
+									},
+								},
+							},
+						},
+					},
+				}
+				w.ExpOut.ErrStr = "decode event json: json: cannot unmarshal string into Go struct field EndpointSubset.subsets.addresses of type []k8sclient.EndpointAddress"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar",
+					httpmock.NewStringResponder(200, `{
+	"type": "ADDED",
+	"object": {
+		"metadata": {
+			"resourceVersion": "8910"
+		},
+		"subsets": [{"addresses": [{"ip": "1.2.3.4"}]}]
+	}
+}
+{
+	"type": "ERROR",
+	"object": {
+		"code": 410,
+		"message": "gone"
+	}
+}
+`),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.ExpOut.CAs = []CallbackArgs{
+					{
+						EventType: EventAdded,
+						Endpoints: &Endpoints{
+							Metadata: Metadata{
+								ResourceVersion: "8910",
+							},
+							Subsets: []EndpointSubset{
+								{
+									Addresses: []EndpointAddress{
+										{IP: "1.2.3.4"},
+									},
+								},
+							},
+						},
+					},
+				}
+				w.ExpOut.ErrStr = "receive error event: gone"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar?resourceVersion=8910",
+					httpmock.NewStringResponder(200, `{
+	"type": "ERROR",
+	"object": {
+		"code": 410,
+		"message": "gone"
+	}
+}
+`),
+				)
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar",
+					httpmock.NewStringResponder(200, `{
+	"type": "ADDED",
+	"object": {
+		"metadata": {
+			"resourceVersion": "8910"
+		},
+		"subsets": [{"addresses": [{"ip": "1.2.3.4"}]}]
+	}
+}
+`),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.In.ResourceVersion = "8910"
+				w.ExpOut.Err = io.EOF
+				w.ExpOut.ErrStr = "decode event json: EOF"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar?resourceVersion=8910",
+					httpmock.NewStringResponder(200, `{
+	"type": "ERROR",
+	"object": {
+		"code": 410,
+		"message": "gone"
+	}
+}
+`),
+				)
+				w.Init.MockTransport.RegisterResponder(
+					"GET",
+					"https://1.2.3.4:6443/api/v1/watch/namespaces/foo/endpoints/bar",
+					httpmock.NewStringResponder(200, `{
+	"type": "ADDED",
+	"object": {
+		"metadata": {
+			"resourceVersion": "8999"
+		},
+		"subsets": [{"addresses": [{"ip": "1.2.3.4"}]}]
+	}
+}
+`),
+				)
+			}).
+			Step(1.5, func(t *testing.T, w *Workspace) {
+				w.In.Namespace = "foo"
+				w.In.EndpointsName = "bar"
+				w.In.ResourceVersion = "8910"
+				w.ExpOut.CAs = []CallbackArgs{
+					{
+						EventType: EventAdded,
+						Endpoints: &Endpoints{
+							Metadata: Metadata{
+								ResourceVersion: "8999",
+							},
+							Subsets: []EndpointSubset{
+								{
+									Addresses: []EndpointAddress{
+										{IP: "1.2.3.4"},
+									},
+								},
+							},
+						},
+					},
+				}
+				w.ExpOut.Err = io.EOF
+				w.ExpOut.ErrStr = "decode event json: EOF"
+			}),
+	)
+}
+
+func TestToken_Get(t *testing.T) {
+	type Workspace struct {
+		In struct {
+			MockClock *clock.Mock
+			Fs        afero.Fs
+		}
+		ExpOut, ActOut struct {
+			Value  string
+			Err    error
+			ErrStr string
+		}
+		T Token
+	}
+	tc := testcase.New().
+		Step(0, func(t *testing.T, w *Workspace) {
+			w.In.MockClock = clock.NewMock()
+			w.In.MockClock.Set(time.Now())
+			w.In.Fs = afero.NewMemMapFs()
+			err := w.In.Fs.MkdirAll("/var/run/secrets/kubernetes.io/serviceaccount", 755)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			err = afero.WriteFile(
+				w.In.Fs,
+				"/var/run/secrets/kubernetes.io/serviceaccount/token",
+				[]byte("tOKen"),
+				644,
+			)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+		}).
+		Step(1, func(t *testing.T, w *Workspace) {
+			w.ActOut.Value, w.ActOut.Err = w.T.Get(w.In.MockClock, w.In.Fs)
+			if w.ActOut.Err != nil {
+				w.ActOut.ErrStr = w.ActOut.Err.Error()
+			}
+		}).
+		Step(2, func(t *testing.T, w *Workspace) {
+			if w.ExpOut.Err == nil || errors.Is(w.ActOut.Err, w.ExpOut.Err) {
+				w.ExpOut.Err = w.ActOut.Err
+			}
+			assert.Equal(t, w.ExpOut, w.ActOut)
+		})
+	testcase.RunListParallel(t,
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				w.ExpOut.Value = "tOKen"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				v, err := w.T.Get(w.In.MockClock, w.In.Fs)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				if !assert.Equal(t, "tOKen", v) {
+					t.FailNow()
+				}
+				err = w.In.Fs.Remove("/var/run/secrets/kubernetes.io/serviceaccount/token")
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.ExpOut.Value = "tOKen"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				v, err := w.T.Get(w.In.MockClock, w.In.Fs)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				if !assert.Equal(t, "tOKen", v) {
+					t.FailNow()
+				}
+				err = afero.WriteFile(
+					w.In.Fs,
+					"/var/run/secrets/kubernetes.io/serviceaccount/token",
+					[]byte("New_tOKen"),
+					644,
+				)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.In.MockClock.Set(w.In.MockClock.Now().Add(24 * time.Hour))
+				w.ExpOut.Value = "New_tOKen"
+			}),
+		tc.Copy().
+			Step(0.5, func(t *testing.T, w *Workspace) {
+				err := w.In.Fs.Remove("/var/run/secrets/kubernetes.io/serviceaccount/token")
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				w.ExpOut.Err = os.ErrNotExist
+				w.ExpOut.ErrStr = "read token file; filePath=\"/var/run/secrets/kubernetes.io/serviceaccount/token\": open /var/run/secrets/kubernetes.io/serviceaccount/token: file does not exist"
+			}),
+	)
+}
+
+func TestToken_Reset(t *testing.T) {
+	var tk Token
+	mockClock := clock.NewMock()
+	mockClock.Set(time.Now())
 	fs := afero.NewMemMapFs()
-	if err := fs.MkdirAll("/var/run/secrets/kubernetes.io/serviceaccount", 755); err != nil {
-		t.Fatal(err)
+	err := fs.MkdirAll("/var/run/secrets/kubernetes.io/serviceaccount", 755)
+	if !assert.NoError(t, err) {
+		t.FailNow()
 	}
-	for _, fileName := range [...]string{"token", "ca.crt", "namespace"} {
-		data, ok := secret.Data[fileName]
-		if !ok {
-			t.Fatalf("can't find %s in secret.Data", fileName)
-		}
-		if err := afero.WriteFile(
-			fs,
-			"/var/run/secrets/kubernetes.io/serviceaccount/"+fileName,
-			data,
-			644,
-		); err != nil {
-			t.Fatal(err)
-		}
+	err = afero.WriteFile(
+		fs,
+		"/var/run/secrets/kubernetes.io/serviceaccount/token",
+		[]byte("tOKen"),
+		644,
+	)
+	if !assert.NoError(t, err) {
+		t.FailNow()
 	}
-	url, err := url.Parse(config.Host)
-	if err != nil {
-		t.Fatal(err)
+	v, err := tk.Get(mockClock, fs)
+	if !assert.NoError(t, err) {
+		t.FailNow()
 	}
-	env := venv.Mock()
-	env.Setenv("KUBERNETES_SERVICE_HOST", url.Hostname())
-	env.Setenv("KUBERNETES_SERVICE_PORT", url.Port())
-	clock := clock.NewMock()
-	clock.Set(time.Now())
-	return &testingEnvironment{
-		Clientset: clientset,
-		Fs:        fs,
-		Env:       env,
-		Clock:     clock,
+	if !assert.Equal(t, "tOKen", v) {
+		t.FailNow()
+	}
+	err = afero.WriteFile(
+		fs,
+		"/var/run/secrets/kubernetes.io/serviceaccount/token",
+		[]byte("New_tOKen"),
+		644,
+	)
+	v, err = tk.Get(mockClock, fs)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	if !assert.Equal(t, "tOKen", v) {
+		t.FailNow()
+	}
+	tk.Reset()
+	v, err = tk.Get(mockClock, fs)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	if !assert.Equal(t, "New_tOKen", v) {
+		t.FailNow()
 	}
 }
