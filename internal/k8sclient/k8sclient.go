@@ -143,16 +143,6 @@ func (kc *k8sClient) getNamespace() (string, error) {
 	return string(namespaceData), nil
 }
 
-func (kc *k8sClient) makeHTTPHeader() (http.Header, error) {
-	tokenData, err := afero.ReadFile(kc.fs, tokenFilePath)
-	if err != nil {
-		return nil, fmt.Errorf("read token file; filePath=%q: %w", tokenFilePath, err)
-	}
-	return http.Header{
-		"Authorization": []string{"Bearer " + string(tokenData)},
-	}, nil
-}
-
 func (kc *k8sClient) GetEndpoints(ctx context.Context, namespace, endpointsName string) (*Endpoints, error) {
 	url := kc.makeURL("/api/v1/namespaces/%s/endpoints/%s", namespace, endpointsName)
 	httpResponse, err := kc.doHTTPGetRequest(ctx, url)
@@ -177,7 +167,7 @@ func (kc *k8sClient) WatchEndpoints(ctx context.Context, namespace, endpointsNam
 	err := kc.doWatchEndpoints(ctx, namespace, endpointsName, resourceVersion, callback)
 	if status, ok := err.(*status); ok && resourceVersion != "" && status.Code == http.StatusGone {
 		err = kc.doWatchEndpoints(ctx, namespace, endpointsName, "", func(eventType EventType, endpoints *Endpoints) bool {
-			if eventType == EventAdded && endpoints.Metadata.ResourceVersion == resourceVersion {
+			if endpoints != nil && endpoints.Metadata.ResourceVersion == resourceVersion {
 				return true
 			}
 			return callback(eventType, endpoints)
