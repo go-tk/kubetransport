@@ -22,21 +22,19 @@ func MustWrapTransport(transport http.RoundTripper) http.RoundTripper {
 // WrapTransport wraps the given transport for client-side load balancing in Kubernetes.
 func WrapTransport(transport http.RoundTripper) (http.RoundTripper, error) {
 	newTransportWrapperOnce.Do(func() {
-		newTransportWrapperResults.TransportWrapper, newTransportWrapperResults.Err = newTransportWrapper()
+		r1, r2 := newTransportWrapper()
+		newTransportWrapperResults = func() (*transportWrapper, error) { return r1, r2 }
 	})
-	transportWrapper, err := newTransportWrapperResults.TransportWrapper, newTransportWrapperResults.Err
+	transportWrapper, err := newTransportWrapperResults()
 	if err != nil {
-		return nil, newTransportWrapperResults.Err
+		return nil, err
 	}
 	return transportWrapper.WrapTransport(transport), nil
 }
 
 var (
 	newTransportWrapperOnce    sync.Once
-	newTransportWrapperResults struct {
-		TransportWrapper *transportWrapper
-		Err              error
-	}
+	newTransportWrapperResults func() (*transportWrapper, error)
 )
 
 type transportWrapper struct {
