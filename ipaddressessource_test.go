@@ -59,7 +59,7 @@ func TestNewIPAddressesSource(t *testing.T) {
 			}
 			w.CAs = make(chan CallbackArgs)
 			w.IPAS = NewIPAddressesSource(w.Init.BackgroundCtx, w.Init.MockK8sClient, w.Init.Namespace, w.Init.EndpointsName, ipAddressesCallback)
-			t.Cleanup(w.IPAS.Close)
+			t.Cleanup(w.IPAS.Stop)
 		}).
 		Step(2, func(t *testing.T, w *Workspace) {
 			for ca := range w.CAs {
@@ -125,7 +125,7 @@ func TestNewIPAddressesSource(t *testing.T) {
 					})
 			}).
 			Step(1.5, func(t *testing.T, w *Workspace) {
-				w.IPAS.Close()
+				w.IPAS.Stop()
 				w.ExpOut.CAs = []CallbackArgs{
 					{},
 					{
@@ -190,7 +190,7 @@ func TestNewIPAddressesSource(t *testing.T) {
 					})
 			}).
 			Step(1.5, func(t *testing.T, w *Workspace) {
-				w.IPAS.Close()
+				w.IPAS.Stop()
 				w.ExpOut.CAs = []CallbackArgs{
 					{
 						IPAddresses: []string{"1.2.3.4", "2.3.4.5", "7.7.7.7", "8.8.8.8"},

@@ -11,14 +11,14 @@ import (
 
 type endpointsRegistry struct {
 	backgroundCtx    context.Context
-	close            func()
+	stop             context.CancelFunc
 	k8sClient        k8sclient.K8sClient
 	ipAddressesCache sync.Map
 }
 
 func newEndpointsRegistry(backgroundCtx context.Context, k8sClient k8sclient.K8sClient, tickInterval time.Duration) *endpointsRegistry {
 	var er endpointsRegistry
-	er.backgroundCtx, er.close = context.WithCancel(backgroundCtx)
+	er.backgroundCtx, er.stop = context.WithCancel(backgroundCtx)
 	er.k8sClient = k8sClient
 	go er.tick(tickInterval)
 	return &er
@@ -41,7 +41,7 @@ func (er *endpointsRegistry) evictIPAddressesCache() {
 	er.ipAddressesCache.Range(func(_, value interface{}) bool {
 		if cachedIPAddresses, ok := value.(*cachedIPAddresses); ok {
 			if hitCount := atomic.LoadInt64(&cachedIPAddresses.HitCount); hitCount == 0 {
-				cachedIPAddresses.Source.Close()
+				cachedIPAddresses.Source.Stop()
 			} else {
 				atomic.CompareAndSwapInt64(&cachedIPAddresses.HitCount, hitCount, 0)
 			}
@@ -102,7 +102,7 @@ func (er *endpointsRegistry) doGetIPAddresses(endpointKey endpointKey, results *
 	newIPAddressesSource(er.backgroundCtx, er.k8sClient, endpointKey.Namespace, endpointKey.EndpointsName, ipAddressesCallback)
 }
 
-func (er *endpointsRegistry) Close() { er.close() }
+func (er *endpointsRegistry) Stop() { er.stop() }
 
 type endpointKey struct {
 	Namespace     string

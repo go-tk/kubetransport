@@ -46,7 +46,7 @@ func TestEndpointsRegistry_GetIPAddresses(t *testing.T) {
 		}).
 		Step(1, func(t *testing.T, w *Workspace) {
 			w.ER = NewEndpointsRegistry(w.Init.BackgroundCtx, w.Init.MockK8sClient, w.Init.TickInterval)
-			t.Cleanup(w.ER.Close)
+			t.Cleanup(w.ER.Stop)
 		}).
 		Step(2, func(t *testing.T, w *Workspace) {
 			w.ActOut.IPAddresses, w.ActOut.Err = w.ER.GetIPAddresses(w.In.Ctx, w.In.Namespace, w.In.EndpointsName)

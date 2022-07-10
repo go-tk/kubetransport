@@ -9,7 +9,7 @@ import (
 
 type ipAddressesSource struct {
 	backgroundCtx context.Context
-	close         func()
+	stop          context.CancelFunc
 	k8sClient     k8sclient.K8sClient
 	namespace     string
 	endpointsName string
@@ -26,7 +26,7 @@ func newIPAddressesSource(
 	valueCallback ipAddressesCallback,
 ) *ipAddressesSource {
 	var ipas ipAddressesSource
-	ipas.backgroundCtx, ipas.close = context.WithCancel(backgroundCtx)
+	ipas.backgroundCtx, ipas.stop = context.WithCancel(backgroundCtx)
 	ipas.k8sClient = k8sClient
 	ipas.namespace = namespace
 	ipas.endpointsName = endpointsName
@@ -78,4 +78,4 @@ func extractIPAddresses(endpoints *k8sclient.Endpoints) []string {
 	return ipAddresses
 }
 
-func (ipas *ipAddressesSource) Close() { ipas.close() }
+func (ipas *ipAddressesSource) Stop() { ipas.stop() }

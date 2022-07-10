@@ -40,7 +40,7 @@ func TestKubeTransport_RoundTrip(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			w.MockK8sClient = mock_k8sclient.NewMockK8sClient(ctrl)
 			w.Init.EndpointsRegistry = NewEndpointsRegistry(context.Background(), w.MockK8sClient, 24*time.Hour)
-			t.Cleanup(w.Init.EndpointsRegistry.Close)
+			t.Cleanup(w.Init.EndpointsRegistry.Stop)
 			var response http.Response
 			w.Init.TransportFunc = func(*http.Request) (*http.Response, error) { return &response, nil }
 			w.Init.Seed = 100
