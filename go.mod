@@ -6,7 +6,7 @@ require (
 	github.com/adammck/venv v0.0.0-20200610172036-e77789703e7c
 	github.com/benbjohnson/clock v1.3.0
 	github.com/go-tk/testcase v0.6.2
-	github.com/go-tk/vk8s v0.2.0
+	github.com/go-tk/vk8s v0.2.1
 	github.com/golang/mock v1.6.0
 	github.com/jarcoal/httpmock v1.2.0
 	github.com/spf13/afero v1.8.2
