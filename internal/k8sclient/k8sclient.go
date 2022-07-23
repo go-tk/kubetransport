@@ -80,7 +80,7 @@ func doNew(fs afero.Fs, transportReplacer transportReplacer, env venv.Env, clock
 	if err != nil {
 		return nil, err
 	}
-	if _, err := kc.token.Get(clock, fs); err != nil {
+	if _, err := kc.token.Get(fs, clock); err != nil {
 		return nil, fmt.Errorf("get token: %w", err)
 	}
 	return &kc, nil
@@ -223,7 +223,7 @@ func (kc *k8sClient) doGetRequest(ctx context.Context, url string) (*http.Respon
 	if err != nil {
 		return nil, fmt.Errorf("new get request; url=%q: %w", url, err)
 	}
-	token, err := kc.token.Get(kc.clock, kc.fs)
+	token, err := kc.token.Get(kc.fs, kc.clock)
 	if err != nil {
 		return nil, fmt.Errorf("get token: %w", err)
 	}
@@ -244,43 +244,52 @@ type token struct {
 }
 
 type tokenState struct {
-	Value           string
-	NextRefreshTime time.Time
+	Value string
+	Timer *clock.Timer
 }
 
-func (t *token) Get(clock clock.Clock, fs afero.Fs) (string, error) {
-	now := clock.Now()
-	if state := t.state(); state != nil && state.NextRefreshTime.After(now) {
+func (t *token) Get(fs afero.Fs, clock clock.Clock) (string, error) {
+	if state := t.state(); state != nil {
 		return state.Value, nil
 	}
 	t.lock.Lock()
 	defer t.lock.Unlock()
-	if state := t.state(); state != nil && state.NextRefreshTime.After(now) {
+	if state := t.state(); state != nil {
 		return state.Value, nil
 	}
-	state, err := t.newState(fs, now)
+	value, err := getToken(fs)
 	if err != nil {
 		return "", err
 	}
+	state := new(tokenState)
+	state.Value = value
+	state.Timer = clock.AfterFunc(tokenRefreshInterval, func() {
+		t.clearState(state)
+	})
 	t.setState(state)
-	return state.Value, nil
+	return value, nil
 }
 
-func (t *token) Reset() { t.setState(nil) }
-
-func (t *token) newState(fs afero.Fs, now time.Time) (*tokenState, error) {
+func getToken(fs afero.Fs) (string, error) {
 	tokenData, err := afero.ReadFile(fs, tokenFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("read token file; filePath=%q: %w", tokenFilePath, err)
+		return "", fmt.Errorf("read token file; filePath=%q: %w", tokenFilePath, err)
 	}
-	return &tokenState{
-		Value:           string(tokenData),
-		NextRefreshTime: now.Add(tokenRefreshInterval),
-	}, nil
+	return string(tokenData), nil
+}
+
+func (t *token) Reset() {
+	if state := t.state(); state != nil && t.clearState(state) {
+		state.Timer.Stop()
+	}
 }
 
 func (t *token) state() *tokenState         { return (*tokenState)(atomic.LoadPointer(&t.state1)) }
 func (t *token) setState(state *tokenState) { atomic.StorePointer(&t.state1, unsafe.Pointer(state)) }
+
+func (t *token) clearState(state *tokenState) bool {
+	return atomic.CompareAndSwapPointer(&t.state1, unsafe.Pointer(state), nil)
+}
 
 type event struct {
 	Type   EventType

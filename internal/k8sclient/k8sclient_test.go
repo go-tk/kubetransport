@@ -852,8 +852,8 @@ lO/HJTzVSS8CIQCySRrL0DQOyd2PYzqPvUq7XHuiIfRqLtLOP4+j7fDGDQ==
 func TestToken_Get(t *testing.T) {
 	type Workspace struct {
 		In struct {
-			MockClock *clock.Mock
 			Fs        afero.Fs
+			MockClock *clock.Mock
 		}
 		ExpOut, ActOut struct {
 			Value  string
@@ -864,8 +864,6 @@ func TestToken_Get(t *testing.T) {
 	}
 	tc := testcase.New().
 		Step(0, func(t *testing.T, w *Workspace) {
-			w.In.MockClock = clock.NewMock()
-			w.In.MockClock.Set(time.Now())
 			w.In.Fs = afero.NewMemMapFs()
 			err := w.In.Fs.MkdirAll("/var/run/secrets/kubernetes.io/serviceaccount", 755)
 			if !assert.NoError(t, err) {
@@ -880,9 +878,11 @@ func TestToken_Get(t *testing.T) {
 			if !assert.NoError(t, err) {
 				t.FailNow()
 			}
+			w.In.MockClock = clock.NewMock()
+			w.In.MockClock.Set(time.Now())
 		}).
 		Step(1, func(t *testing.T, w *Workspace) {
-			w.ActOut.Value, w.ActOut.Err = w.T.Get(w.In.MockClock, w.In.Fs)
+			w.ActOut.Value, w.ActOut.Err = w.T.Get(w.In.Fs, w.In.MockClock)
 			if w.ActOut.Err != nil {
 				w.ActOut.ErrStr = w.ActOut.Err.Error()
 			}
@@ -900,7 +900,7 @@ func TestToken_Get(t *testing.T) {
 			}),
 		tc.Copy().
 			Step(0.5, func(t *testing.T, w *Workspace) {
-				v, err := w.T.Get(w.In.MockClock, w.In.Fs)
+				v, err := w.T.Get(w.In.Fs, w.In.MockClock)
 				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
@@ -915,7 +915,7 @@ func TestToken_Get(t *testing.T) {
 			}),
 		tc.Copy().
 			Step(0.5, func(t *testing.T, w *Workspace) {
-				v, err := w.T.Get(w.In.MockClock, w.In.Fs)
+				v, err := w.T.Get(w.In.Fs, w.In.MockClock)
 				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
@@ -948,8 +948,6 @@ func TestToken_Get(t *testing.T) {
 
 func TestToken_Reset(t *testing.T) {
 	var tk Token
-	mockClock := clock.NewMock()
-	mockClock.Set(time.Now())
 	fs := afero.NewMemMapFs()
 	err := fs.MkdirAll("/var/run/secrets/kubernetes.io/serviceaccount", 755)
 	if !assert.NoError(t, err) {
@@ -964,7 +962,9 @@ func TestToken_Reset(t *testing.T) {
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
-	v, err := tk.Get(mockClock, fs)
+	mockClock := clock.NewMock()
+	mockClock.Set(time.Now())
+	v, err := tk.Get(fs, mockClock)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
@@ -977,7 +977,7 @@ func TestToken_Reset(t *testing.T) {
 		[]byte("New_tOKen"),
 		644,
 	)
-	v, err = tk.Get(mockClock, fs)
+	v, err = tk.Get(fs, mockClock)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
@@ -985,7 +985,7 @@ func TestToken_Reset(t *testing.T) {
 		t.FailNow()
 	}
 	tk.Reset()
-	v, err = tk.Get(mockClock, fs)
+	v, err = tk.Get(fs, mockClock)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
