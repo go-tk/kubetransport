@@ -931,6 +931,13 @@ func TestToken_Get(t *testing.T) {
 				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
+				w.In.MockClock.Set(w.In.MockClock.Now().Add(10 * time.Second))
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				if !assert.Equal(t, "tOKen", v) {
+					t.FailNow()
+				}
 				w.In.MockClock.Set(w.In.MockClock.Now().Add(24 * time.Hour))
 				w.ExpOut.Value = "New_tOKen"
 			}),
